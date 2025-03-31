@@ -1,114 +1,71 @@
-from SPARQLWrapper import SPARQLWrapper, JSON
+import requests
 import networkx as nx
 import matplotlib.pyplot as plt
-import requests
-import os
-from dotenv import load_dotenv
+from SPARQLWrapper import SPARQLWrapper, JSON
 
-# --------------------------
-# Configuration
-# --------------------------
-load_dotenv()
-GKG_API_KEY = os.getenv("gkg_api")
-DBPEDIA_SPARQL = "https://dbpedia.org/sparql"
-WIKIDATA_SPARQL = "https://query.wikidata.org/sparql"
-
-# --------------------------
-# Core Functions
-# --------------------------
-def get_user_input():
-    return (
-        input("Enter first drug: ").strip(),
-        input("Enter second drug: ").strip()
-    )
-
-def get_interaction_report(drug_a, drug_b):
-    def query_source(source_func, drug):
-        try:
-            return source_func(drug)
-        except:
-            return set()
-    
-    sources = [query_dbpedia, query_wikidata, query_google_kg]
-    
-    neighbors_a = set().union(*[query_source(f, drug_a) for f in sources])
-    neighbors_b = set().union(*[query_source(f, drug_b) for f in sources])
-    
-    return {
-        "drug_a": drug_a,
-        "drug_b": drug_b,
-        "direct": drug_b in neighbors_a or drug_a in neighbors_b,
-        "common": neighbors_a & neighbors_b,
-        "neighbors_a": neighbors_a,
-        "neighbors_b": neighbors_b
+def get_wikidata_id(drug_name):
+    """Retrieve the Wikidata ID for a given drug name."""
+    url = "https://www.wikidata.org/w/api.php"
+    params = {
+        "action": "wbsearchentities",
+        "format": "json",
+        "search": drug_name,
+        "language": "en",
+        "type": "item"
     }
+    response = requests.get(url, params=params)
+    data = response.json()
+    if data["search"]:
+        return data["search"][0]["id"]
+    else:
+        raise ValueError(f"No Wikidata ID found for drug: {drug_name}")
 
-def display_report(report):
-    print(f"\nInteraction Report ({report['drug_a']} vs {report['drug_b']}):")
-    print(f"Direct interaction: {'Yes' if report['direct'] else 'No'}")
-    print(f"Shared interactions: {report['common'] or 'None'}")
+def get_drug_interactions(drug_wikidata_id, drug_name, limit=20):
+    """Query Wikidata for drug-drug interactions of a specific drug."""
+    sparql = SPARQLWrapper("https://query.wikidata.org/sparql")
+    query = f"""
+    PREFIX wdt: <http://www.wikidata.org/prop/direct/>
+    PREFIX wd: <http://www.wikidata.org/entity/>
 
-def visualize_interaction(report):
-    G = nx.Graph()
-    G.add_edges_from((report['drug_a'], n) for n in report['neighbors_a'])
-    G.add_edges_from((report['drug_b'], n) for n in report['neighbors_b'])
-    
-    edge_colors = [
-        'red' if n in report['common'] else 'black'
-        for n in G.nodes() if n != report['drug_a'] and n != report['drug_b']
-    ]
-    
-    plt.figure(figsize=(12, 8))
-    nx.draw(G, nx.spring_layout(G, seed=42), 
-            with_labels=True, node_color='lightblue',
-            edge_color=edge_colors, node_size=2500)
-    plt.title(f"Interaction Map: {report['drug_a']} vs {report['drug_b']}")
+    SELECT ?drug2Label ?interactionTypeLabel
+    WHERE {{
+      wd:{drug_wikidata_id} wdt:P129 ?drug2 .
+      OPTIONAL {{ wd:{drug_wikidata_id} wdt:P2175 ?interactionType }}
+      SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
+    }}
+    LIMIT {limit}
+    """
+    sparql.setQuery(query)
+    sparql.setReturnFormat(JSON)
+    results = sparql.query().convert()
+    interactions = []
+    for result in results["results"]["bindings"]:
+        drug2 = result["drug2Label"]["value"]
+        interaction = result.get("interactionTypeLabel", {}).get("value", "Unknown")
+        interactions.append((drug_name, drug2, interaction))
+    return interactions
+
+def visualize_graph(interactions, drug_name):
+    """Visualize drug interactions using NetworkX and Matplotlib."""
+    G = nx.DiGraph()
+    for drug1, drug2, interaction in interactions:
+        G.add_node(drug1, color='red')
+        G.add_node(drug2, color='blue')
+        G.add_edge(drug1, drug2, label=interaction)
+    pos = nx.spring_layout(G, seed=42)
+    node_colors = [G.nodes[n]['color'] for n in G.nodes]
+    plt.figure(figsize=(10, 6))
+    nx.draw(G, pos, with_labels=True, node_color=node_colors, edge_color="gray", font_size=10, node_size=2000, font_weight="bold")
+    edge_labels = {(drug1, drug2): interaction for drug1, drug2, interaction in interactions}
+    nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_size=9, label_pos=0.5)
+    plt.title(f"Drug Interactions for {drug_name}")
     plt.show()
 
-# --------------------------
-# Data Source Functions
-# --------------------------
-def query_dbpedia(drug):
-    sparql = SPARQLWrapper(DBPEDIA_SPARQL)
-    sparql.setQuery(f"""
-        PREFIX dbo: <http://dbpedia.org/ontology/>
-        PREFIX dbr: <http://dbpedia.org/resource/>
-        SELECT ?relatedDrug WHERE {{
-            dbr:{drug} dbo:relatedDrug ?relatedDrug .
-        }} LIMIT 10
-    """)
-    return {result["relatedDrug"]["value"].split("/")[-1] 
-            for result in sparql.query().convert()["results"]["bindings"]}
-
-def query_wikidata(drug):
-    sparql = SPARQLWrapper(WIKIDATA_SPARQL)
-    sparql.setQuery(f"""
-        SELECT ?interactionLabel WHERE {{
-            wd:{drug} wdt:P769 ?interaction .
-            SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
-        }}
-    """)
-    return {result["interactionLabel"]["value"] 
-            for result in sparql.query().convert()["results"]["bindings"]}
-
-def query_google_kg(drug):
-    response = requests.get(
-        "https://kgsearch.googleapis.com/v1/entities:search",
-        params={"query": drug, "key": GKG_API_KEY, "limit": 10, "languages": "en"}
-    )
-    return {item.get("result", {}).get("name", "Unknown") 
-            for item in response.json().get("itemListElement", [])}
-
-# --------------------------
-# Main Execution
-# --------------------------
-def main():
-    drug_a, drug_b = get_user_input()
-    report = get_interaction_report(drug_a, drug_b)
-    display_report(report)
-    
-    if input("\nVisualize interaction? (y/n): ").lower() == 'y':
-        visualize_interaction(report)
-
-if __name__ == "__main__":
-    main()
+drug_name = "Aspirin"
+try:
+    drug_wikidata_id = get_wikidata_id(drug_name)
+    interactions = get_drug_interactions(drug_wikidata_id, drug_name)
+    print(interactions)
+    visualize_graph(interactions, drug_name)
+except ValueError as e:
+    print(e)

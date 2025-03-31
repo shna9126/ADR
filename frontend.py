@@ -1,15 +1,16 @@
 import streamlit as st
 from groq import Groq
+from SPARQLWrapper import SPARQLWrapper, JSON
+import tiktoken
 import os
 from dotenv import load_dotenv
-from preprocess import yake_keywords
-from PIL import Image
-from context_med import get_dbpedia_interactions, get_wikidata_interactions, get_google_kg_interactions  # Import functions
-from onto import get_interaction_report, visualize_interaction
+from onto import get_drug_interactions , get_wikidata_id , visualize_graph
 import matplotlib.pyplot as plt
 import requests
 import xml.etree.ElementTree as ET
 import arxiv
+from context_med import get_context 
+
 
 # Load environment variables
 load_dotenv()
@@ -126,63 +127,33 @@ def patient_feedback():
             return {"feedback": feedback, "additional_results": additional_results}
     return None
 
-def process_uploaded_image(uploaded_file):
-    """Handle image conversion and compression."""
-    if uploaded_file.size > MAX_FILE_SIZE_MB * 1024 * 1024:
-        st.error(f"File too large! Max size: {MAX_FILE_SIZE_MB}MB.")
-        return None
-
-    try:
-        image = Image.open(uploaded_file)
-        compressed_path = f"compressed_{uploaded_file.name}"
-        image.save(compressed_path, "JPEG", optimize=True, quality=70)
-        return compressed_path
-    except Exception as e:
-        st.error(f"Image processing failed: {e}")
-        return None
 
 
-def fetch_combined_context(drug):
-    """Fetch combined context from DBpedia, Wikidata, and Google Knowledge Graph."""
-    dbpedia_context = get_dbpedia_interactions(drug)
-    wikidata_context = get_wikidata_interactions(drug)
-    google_kg_context = get_google_kg_interactions(drug)
 
-    combined_context = {
-        "DBpedia": dbpedia_context,
-        "Wikidata": wikidata_context,
-        "GoogleKG": google_kg_context,
-    }
+def fetch_drug_context(drugs):
+    """Fetch combined context for multiple drugs from DBpedia, Wikidata, and Google Knowledge Graph."""
+    drug_contexts = []
+    for drug in drugs.split(","):
+        drug = drug.strip()  # Remove any extra whitespace
+        drug_id = get_wikidata_id(drug)
+        wikidata_context = get_drug_interactions(drug_id, drug)
+        context_text = get_context(drug)
+        drug_contexts.append(f"Drug: {drug}\n{wikidata_context}\n{context_text}")
+    return "\n\n".join(drug_contexts)
 
-    return combined_context
 
-def get_arxiv_context(query):
-    """Fetch research papers from Arxiv based on a query using the arxiv library."""
-    try:
-        search = arxiv.Search(
-            query=query,
-            max_results=5,  # Limit the number of results
-            sort_by=arxiv.SortCriterion.SubmittedDate
-        )
-        papers = []
-        for result in search.results():
-            papers.append({
-                "title": result.title,
-                "summary": result.summary,
-                "link": result.entry_id,
-                "published": result.published.strftime("%Y-%m-%d")
-            })
-        return papers
-    except Exception as e:
-        print(f"Arxiv API request failed: {e}")
-        return []
 
-def analyze_image(image_path, user_details):
+def fetch_disease_context(disease):
+    context = get_context(disease)
+    return context
+
+def analyze_data(user_details):
     """Fetch context and generate a patient report."""
     with st.spinner("🔍 Analyzing Data..."):
+
         # Fetch drug-specific context
-        drug_context = fetch_combined_context(user_details["current_disease"])
-        arxiv_context = get_arxiv_context(user_details["current_disease"])
+        drug_context = fetch_drug_context(user_details["medications"])
+        disease_context = fetch_disease_context(user_details["current_disease"])
 
         # Combine all user details and additional context
         combined_context = f"""
@@ -211,10 +182,8 @@ def analyze_image(image_path, user_details):
         Feedback:
         {user_details.get('feedback', 'No feedback provided.')}
 
-        Drug-Specific Context:
-        DBpedia: {', '.join(drug_context['DBpedia']) if drug_context['DBpedia'] else 'No context found.'}
-        Wikidata: {', '.join(drug_context['Wikidata']) if drug_context['Wikidata'] else 'No context found.'}
-        Arxiv: {', '.join([paper['title'] for paper in arxiv_context]) if arxiv_context else 'No context found.'}
+        Drug-Specific Context:{drug_context}
+        Disease-Specific Context:{disease_context}
         """
 
         # Debugging: Display the combined context being sent to the LLM
@@ -246,41 +215,12 @@ def analyze_image(image_path, user_details):
 
     return insights  # Return insights for further use
 
-def analyze_drug_interaction(drug_a, drug_b):
-    """Analyze the interaction between two drugs and visualize the results."""
-    st.header("💊 Drug Interaction Analysis")
+# def analyze_drug_interaction(user_details):
+#     drug_id = get_wikidata_id(user_details["medications"])
+#     wikidata_context = get_drug_interactions(drug_id, user_details["medications"])
+#     visualize_graph(wikidata_context, user_details["medications"])
 
-    if not drug_a or not drug_b:
-        st.error("Please ensure both drug names are provided.")
-        return
 
-    # Get the interaction report
-    with st.spinner("🔍 Analyzing drug interactions..."):
-        report = get_interaction_report(drug_a, drug_b)
-
-    # Display the interaction report
-    st.subheader("Interaction Report")
-    st.write(f"**Drugs Analyzed:** {drug_a} and {drug_b}")
-    st.write(f"**Direct Interaction:** {'Yes' if report['direct'] else 'No'}")
-    st.write(f"**Shared Interactions:** {', '.join(report['common']) if report['common'] else 'None'}")
-
-    # Visualize the interaction
-    st.subheader("Interaction Visualization")
-    with st.spinner("🔍 Generating visualization..."):
-        fig, ax = plt.subplots(figsize=(12, 8))
-        visualize_interaction(report)  # Generate the visualization
-        st.pyplot(fig)
-
-    # Generate deeper analysis
-    deeper_analysis = f"""
-    **Deeper Analysis:**
-    - The drugs {drug_a} and {drug_b} {'have' if report['direct'] else 'do not have'} a direct interaction.
-    - Shared interactions: {', '.join(report['common']) if report['common'] else 'None'}.
-    - Neighboring drugs for {drug_a}: {', '.join(report['neighbors_a']) if report['neighbors_a'] else 'None'}.
-    - Neighboring drugs for {drug_b}: {', '.join(report['neighbors_b']) if report['neighbors_b'] else 'None'}.
-    """
-    st.subheader("Deeper Analysis")
-    st.write(deeper_analysis)
 
 
 def main():
@@ -302,7 +242,7 @@ def main():
         st.success("✅ Basic details submitted successfully!")
 
         # Process the data and generate the report immediately after submission
-        insights = analyze_image(None, user_details)
+        analyze_data(user_details)
 
         # Extract drug names from user details
         ongoing_medications = user_details.get("medications", "")
@@ -311,12 +251,12 @@ def main():
         # Extract the first drug from each field
         drug_a = ongoing_medications.split(",")[0].strip() if ongoing_medications else None
         drug_b = prescribed_medicines.split(",")[0].strip() if prescribed_medicines else None
-
+        drugs = drug_a + drug_b
         # Drug interaction analysis
-        if drug_a and drug_b:
-            analyze_drug_interaction(drug_a, drug_b)
-        else:
-            st.warning("Unable to analyze drug interactions. Please ensure both fields are filled.")
+        # for drug in drugs:
+        #     analyze_drug_interaction(drug_a)
+        # else:
+        #     st.warning("Unable to analyze drug interactions. Please ensure both fields are filled.")
 
         # Ask for feedback after displaying the report
         feedback = patient_feedback()

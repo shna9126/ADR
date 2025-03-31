@@ -1,175 +1,189 @@
-import os
 import requests
-import networkx as nx
-import matplotlib.pyplot as plt
-from SPARQLWrapper import SPARQLWrapper, JSON
 import xml.etree.ElementTree as ET
+from bs4 import BeautifulSoup
+import tiktoken
+import arxiv  # Import the arXiv library
 
-# --------------------------
-# Helper Functions
-# --------------------------
-def fetch_sparql_results(endpoint, query):
-    """Helper function to execute a SPARQL query and return results."""
-    sparql = SPARQLWrapper(endpoint)
-    sparql.setQuery(query)
-    sparql.setReturnFormat(JSON)
-    try:
-        results = sparql.query().convert()
-        return results["results"]["bindings"]
-    except Exception as e:
-        print(f"SPARQL query failed: {e}")
-        return []
+MAX_TOKENS = 20000  
 
-# --------------------------
-# Wikipedia Context
-# --------------------------
-def get_dbpedia_interactions(drug):
-    """Fetch drug interactions from DBpedia."""
-    query = f"""
-    SELECT ?interaction WHERE {{
-        dbr:{drug} dbo:drugInteraction ?interaction .
-    }}
+def get_context(drug_name, pubmed_limit=5, arxiv_limit=5):
     """
-    results = fetch_sparql_results("http://dbpedia.org/sparql", query)
-    return [result['interaction']['value'].split("/")[-1] for result in results]
+    Retrieve comprehensive information about a drug, including its PubChem data,
+    Wikipedia summary, related PubMed articles, and arXiv articles, ensuring the total token count
+    does not exceed the model's context window.
 
-def get_wikidata_interactions(drug):
-    """Fetch drug interactions from Wikidata."""
-    query = f"""
-    SELECT ?interaction WHERE {{
-        wd:{drug} wdt:P769 ?interaction .
-    }}
+    Parameters:
+    - drug_name (str): The common name of the drug.
+    - pubmed_limit (int): Maximum number of PubMed articles to retrieve.
+    - arxiv_limit (int): Maximum number of arXiv articles to retrieve.
+
+    Returns:
+    - dict: A dictionary containing the drug's context information.
     """
-    results = fetch_sparql_results("https://query.wikidata.org/sparql", query)
-    return [result['interaction']['value'].split("/")[-1] for result in results]
+    context = {"Drug Name": drug_name}
 
-# --------------------------
-# Arxiv Context
-# --------------------------
-def get_arxiv_context(query):
-    """Fetch research papers from Arxiv based on a query."""
-    url = "http://export.arxiv.org/api/query"
-    params = {
-        "search_query": query,
-        "start": 0,
-        "max_results": 5
-    }
-    try:
-        response = requests.get(url, params=params)
-        response.raise_for_status()
-        root = ET.fromstring(response.content)
-        papers = []
-        for entry in root.findall("{http://www.w3.org/2005/Atom}entry"):
-            title = entry.find("{http://www.w3.org/2005/Atom}title").text
-            summary = entry.find("{http://www.w3.org/2005/Atom}summary").text
-            papers.append({"title": title, "summary": summary})
-        return papers
-    except requests.exceptions.RequestException as e:
-        print(f"Arxiv API request failed: {e}")
-        return []
+    pubchem_data = get_pubchem_data(drug_name)
+    context["PubChem Data"] = pubchem_data
 
-# --------------------------
-# Combined Context
-# --------------------------
-def fetch_combined_context(drug):
-    """Fetch combined context from DBpedia, Wikidata, Google Knowledge Graph, and Arxiv."""
-    dbpedia_context = get_dbpedia_interactions(drug)
-    wikidata_context = get_wikidata_interactions(drug)
-    arxiv_context = get_arxiv_context(drug)
+    wikipedia_summary = get_wikipedia_summary(drug_name)
+    context["Wikipedia Summary"] = wikipedia_summary
 
-    combined_context = {
-        "DBpedia": dbpedia_context,
-        "Wikidata": wikidata_context,
-        "Arxiv": arxiv_context,
-    }
+    pubmed_articles = get_pubmed_articles(drug_name, pubmed_limit)
+    context["PubMed Articles"] = pubmed_articles
 
-    return combined_context
+    arxiv_articles = get_arxiv_articles(drug_name, arxiv_limit)
+    context["arXiv Articles"] = arxiv_articles
 
-def get_google_kg_interactions(drug):
-    """Fetch drug-related data from Google Knowledge Graph API."""
-    api_key = os.getenv("GOOGLE_KG_API_KEY")
-    if not api_key:
-        print("Google KG API key not found.")
-        return []
+    truncated_context = truncate_context(context, MAX_TOKENS)
 
-    url = "https://kgsearch.googleapis.com/v1/entities:search"
-    params = {
-        "query": drug,
-        "key": api_key,
-        "limit": 10,
-        "indent": True
-    }
+    return truncated_context
 
-    try:
-        response = requests.get(url, params=params)
-        response.raise_for_status()
+def get_pubchem_data(drug_name):
+    """Fetch chemical properties from PubChem."""
+    url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/{drug_name}/property/MolecularFormula,MolecularWeight,IUPACName,CanonicalSMILES/JSON"
+    response = requests.get(url)
+    if response.ok:
         data = response.json()
-        return [
-            item["result"]["name"]
-            for item in data.get("itemListElement", [])
-            if "result" in item and "name" in item["result"]
-        ]
-    except requests.exceptions.RequestException as e:
-        print(f"Google KG API request failed: {e}")
-        return []
+        properties = data.get("PropertyTable", {}).get("Properties", [{}])[0]
+        return {
+            "Molecular Formula": properties.get("MolecularFormula", "N/A"),
+            "Molecular Weight": properties.get("MolecularWeight", "N/A"),
+            "IUPAC Name": properties.get("IUPACName", "N/A"),
+            "Canonical SMILES": properties.get("CanonicalSMILES", "N/A")
+        }
+    return {}
 
-def fetch_food_context(drug):
-    """
-    Fetch combined drug interaction data from DBpedia, Wikidata, and Google Knowledge Graph.
-    """
-    dbpedia_interactions = get_dbpedia_interactions(drug)
-    wikidata_interactions = get_wikidata_interactions(drug)
-    google_kg_interactions = get_google_kg_interactions(drug)
+def get_wikipedia_summary(drug_name):
+    """Fetch the summary section from Wikipedia for the given drug."""
+    url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{drug_name}"
+    response = requests.get(url)
+    if response.ok:
+        data = response.json()
+        return data.get("extract", "No summary available.")
+    return "No summary available."
 
-    combined_interactions = {
-        "DBpedia": dbpedia_interactions,
-        "Wikidata": wikidata_interactions,
-        "GoogleKG": google_kg_interactions
+def get_pubmed_articles(drug_name, limit):
+    """Fetch related articles from PubMed."""
+    url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+    params = {
+        "db": "pubmed",
+        "term": drug_name,
+        "retmax": limit,
+        "retmode": "xml"
     }
+    response = requests.get(url, params=params)
+    articles = []
+    if response.ok:
+        root = ET.fromstring(response.content)
+        ids = [id_elem.text for id_elem in root.findall(".//Id")]
+        for pubmed_id in ids:
+            fetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
+            fetch_params = {
+                "db": "pubmed",
+                "id": pubmed_id,
+                "retmode": "json"
+            }
+            fetch_response = requests.get(fetch_url, params=fetch_params)
+            if fetch_response.ok:
+                summary = fetch_response.json().get("result", {}).get(pubmed_id, {})
+                articles.append({
+                    "Title": summary.get("title", "No title available"),
+                    "Source": summary.get("source", "No source available"),
+                    "Publication Date": summary.get("pubdate", "No date available"),
+                    "PubMed ID": pubmed_id,
+                    "URL": f"https://pubmed.ncbi.nlm.nih.gov/{pubmed_id}/"
+                })
+    return articles
 
-    return combined_interactions
+def get_arxiv_articles(query, limit=5):
+    """
+    Fetch related articles from arXiv.
 
-def check_combined_interaction(drug1, drug2):
-    """Check for common interactions between two drugs and visualize."""
-    interactions1 = set(get_dbpedia_interactions(drug1) +
-                        get_wikidata_interactions(drug1) +
-                        get_google_kg_interactions(drug1))
+    Parameters:
+    - query (str): The search query for arXiv.
+    - limit (int): Maximum number of articles to retrieve.
 
-    interactions2 = set(get_dbpedia_interactions(drug2) +
-                        get_wikidata_interactions(drug2) +
-                        get_google_kg_interactions(drug2))
+    Returns:
+    - list: A list of dictionaries containing arXiv article details.
+    """
+    articles = []
+    search = arxiv.Search(
+        query=query,
+        max_results=limit,
+        sort_by=arxiv.SortCriterion.Relevance
+    )
+    for result in search.results():
+        articles.append({
+            "Title": result.title,
+            "Authors": ", ".join(author.name for author in result.authors),
+            "Published Date": result.published.strftime("%Y-%m-%d"),
+            "Summary": result.summary,
+            "URL": result.entry_id
+        })
+    return articles
 
-    common_interactions = interactions1 & interactions2
-    visualize_interactions(drug1, drug2, interactions1, interactions2, common_interactions)
+def truncate_context(context, max_tokens):
+    """
+    Truncate the context dictionary to ensure the total token count does not exceed max_tokens.
 
-    return common_interactions if common_interactions else "No known combined interactions found."
+    Parameters:
+    - context (dict): The context dictionary containing various sections of information.
+    - max_tokens (int): The maximum number of tokens allowed.
 
-# --------------------------
-# Visualization (from onto.py)
-# --------------------------
-def visualize_interactions(drug1, drug2, interactions1, interactions2, common_interactions):
-    """Visualize drug interactions as a network graph."""
-    import networkx as nx
-    import matplotlib.pyplot as plt
+    Returns:
+    - dict: The truncated context dictionary.
+    """
+    tokenizer = tiktoken.get_encoding("cl100k_base")
+    def count_tokens(text):
+        return len(tokenizer.encode(text))
 
-    G = nx.Graph()
-    G.add_node(drug1, color="blue")
-    G.add_node(drug2, color="green")
+    sections = {}
+    total_tokens = 0
+    for key, value in context.items():
+        if isinstance(value, list):
+            serialized_value = "\n".join(str(item) for item in value)
+        else:
+            serialized_value = str(value)
+        token_count = count_tokens(serialized_value)
+        sections[key] = {
+            "content": serialized_value,
+            "tokens": token_count
+        }
+        total_tokens += token_count
 
-    for interaction in interactions1:
-        G.add_edge(drug1, interaction, color="blue")
-    for interaction in interactions2:
-        G.add_edge(drug2, interaction, color="green")
-    for interaction in common_interactions:
-        G.add_edge(drug1, interaction, color="red")
-        G.add_edge(drug2, interaction, color="red")
+    if total_tokens <= max_tokens:
+        return context
 
-    pos = nx.spring_layout(G)
-    colors = [G[u][v]["color"] for u, v in G.edges()]
-    nx.draw(G, pos, with_labels=True, edge_color=colors, node_color="lightblue", node_size=2000, font_size=10)
-    plt.show()
+    section_order = ["PubChem Data", "Wikipedia Summary", "PubMed Articles", "arXiv Articles"]
+    truncated_context = {}
+    remaining_tokens = max_tokens
 
-if __name__ == "__main__":
-    drug1 = input("Enter first drug name: ").strip().replace(" ", "_")
-    drug2 = input("Enter second drug name: ").strip().replace(" ", "_")
-    print(check_combined_interaction(drug1, drug2))
+    for section in section_order:
+        if section in sections:
+            if sections[section]["tokens"] <= remaining_tokens:
+                truncated_context[section] = context[section]
+                remaining_tokens -= sections[section]["tokens"]
+            else:
+                # Truncate the content to fit the remaining tokens
+                truncated_content = truncate_text(sections[section]["content"], remaining_tokens, tokenizer)
+                truncated_context[section] = truncated_content
+                break
+
+    return truncated_context
+
+def truncate_text(text, max_tokens, tokenizer):
+    """
+    Truncate a text string to fit within the specified number of tokens.
+
+    Parameters:
+    - text (str): The text to be truncated.
+    - max_tokens (int): The maximum number of tokens allowed.
+    - tokenizer: The tokenizer instance used to encode the text.
+
+    Returns:
+    - str: The truncated text.
+    """
+    tokens = tokenizer.encode(text)
+    if len(tokens) > max_tokens:
+        tokens = tokens[:max_tokens]
+    return tokenizer.decode(tokens)
