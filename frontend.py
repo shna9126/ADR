@@ -152,7 +152,7 @@ def analyze_data(user_details):
     with st.spinner("🔍 Analyzing Data..."):
 
         # Fetch drug-specific context
-        drug_context = fetch_drug_context(user_details["medications"])
+        drug_context = fetch_drug_context(user_details["medications"]) + fetch_drug_context(user_details["prescribed_medicines"])
         disease_context = fetch_disease_context(user_details["current_disease"])
 
         # Combine all user details and additional context
@@ -192,14 +192,14 @@ def analyze_data(user_details):
 
         # Prompt for the LLM
         prompt = f"""
-        You are a medical assistant. Based on the following patient details and context, generate a detailed patient report with health insights and recommendations:
+        You are a pharmacovigilance expert. Based on the following patient details and context, analyze the potential for adverse drug reactions (ADRs) and provide detailed insights and recommendations:
         {combined_context}
         """
 
         # Call the LLM to generate the report
         response = client.chat.completions.create(
             messages=[
-                {"role": "system", "content": "You are a medical assistant."},
+                {"role": "system", "content": "You are a pharmacovigilance expert."},
                 {"role": "user", "content": prompt}
             ],
             model="llama-3.3-70b-versatile"
@@ -209,17 +209,31 @@ def analyze_data(user_details):
         insights = response.choices[0].message.content
 
     # Display the report to the user
-    st.success("✅ Report Generated Successfully!")
-    st.subheader("Patient Report 📝")
+    st.success("✅ ADR Analysis Report Generated Successfully!")
+    st.subheader("Adverse Drug Reaction Analysis Report 📝")
     st.write(insights)
 
     return insights  # Return insights for further use
 
-# def analyze_drug_interaction(user_details):
-#     drug_id = get_wikidata_id(user_details["medications"])
-#     wikidata_context = get_drug_interactions(drug_id, user_details["medications"])
-#     visualize_graph(wikidata_context, user_details["medications"])
 
+
+def analyze_drug_interaction(user_details):
+    """Visualize the interaction graph for each drug in the medications and prescribed medicines and display it in Streamlit."""
+    st.header("🔗 Drug Interaction Visualization")
+    medications = user_details["medications"] + "," + user_details["prescribed_medicines"]  # Combine medications and prescribed medicines
+    for drug in medications.split(","):
+        drug = drug.strip()  # Remove any extra whitespace
+        if drug:  # Ensure the drug name is not empty
+            try:
+                drug_id = get_wikidata_id(drug)
+                interactions = get_drug_interactions(drug_id, drug)
+                if interactions:
+                    plot = visualize_graph(interactions, drug)
+                    st.pyplot(plot)  # Display the plot in Streamlit
+                else:
+                    st.warning(f"No interactions found for {drug}.")
+            except ValueError as e:
+                st.error(f"Error fetching data for {drug}: {e}")
 
 
 
@@ -244,21 +258,10 @@ def main():
         # Process the data and generate the report immediately after submission
         analyze_data(user_details)
 
-        # Extract drug names from user details
-        ongoing_medications = user_details.get("medications", "")
-        prescribed_medicines = user_details.get("prescribed_medicines", "")
 
         # Extract the first drug from each field
-        drug_a = ongoing_medications.split(",")[0].strip() if ongoing_medications else None
-        drug_b = prescribed_medicines.split(",")[0].strip() if prescribed_medicines else None
-        drugs = drug_a + drug_b
-        # Drug interaction analysis
-        # for drug in drugs:
-        #     analyze_drug_interaction(drug_a)
-        # else:
-        #     st.warning("Unable to analyze drug interactions. Please ensure both fields are filled.")
+        analyze_drug_interaction(user_details)
 
-        # Ask for feedback after displaying the report
         feedback = patient_feedback()
         if feedback:
             st.info("Your feedback will be used for deeper analysis.")

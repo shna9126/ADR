@@ -46,7 +46,7 @@ def get_drug_interactions(drug_wikidata_id, drug_name, limit=20):
     return interactions
 
 def visualize_graph(interactions, drug_name):
-    """Visualize drug interactions using NetworkX and Matplotlib."""
+    """Visualize drug interactions using NetworkX and Matplotlib and return the plot."""
     G = nx.DiGraph()
     for drug1, drug2, interaction in interactions:
         G.add_node(drug1, color='red')
@@ -55,17 +55,20 @@ def visualize_graph(interactions, drug_name):
     pos = nx.spring_layout(G, seed=42)
     node_colors = [G.nodes[n]['color'] for n in G.nodes]
     plt.figure(figsize=(10, 6))
-    nx.draw(G, pos, with_labels=True, node_color=node_colors, edge_color="gray", font_size=10, node_size=2000, font_weight="bold")
+    nx.draw(
+        G, pos, with_labels=True, node_color=node_colors, edge_color="gray",
+        font_size=10, node_size=2000, font_weight="bold"
+    )
     edge_labels = {(drug1, drug2): interaction for drug1, drug2, interaction in interactions}
     nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_size=9, label_pos=0.5)
     plt.title(f"Drug Interactions for {drug_name}")
-    plt.show()
+    return plt
 
-drug_name = "Aspirin"
-try:
-    drug_wikidata_id = get_wikidata_id(drug_name)
-    interactions = get_drug_interactions(drug_wikidata_id, drug_name)
-    print(interactions)
-    visualize_graph(interactions, drug_name)
-except ValueError as e:
-    print(e)
+# drug_name = "Aspirin"
+# try:
+#     drug_wikidata_id = get_wikidata_id(drug_name)
+#     interactions = get_drug_interactions(drug_wikidata_id, drug_name)
+#     print(interactions)
+#     visualize_graph(interactions, drug_name)
+# except ValueError as e:
+#     print(e)
